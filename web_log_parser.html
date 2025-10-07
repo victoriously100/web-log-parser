@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Support Log Analyzer Dashboard</title>
+    <!-- Load Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Pyodide for running Python in the browser -->
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.25.0/full/pyodide.js"></script>
+    
+    <style>
+        /* Custom styles for a professional look */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        /* Style for the log results box */
+        #results-output {
+            min-height: 200px;
+            overflow-y: scroll;
+            white-space: pre-wrap; /* Keeps line breaks and spacing */
+            font-family: 'Consolas', 'Monospace';
+            font-size: 0.875rem; /* text-sm */
+            background-color: #1f2937; /* bg-gray-800 */
+            color: #d1d5db; /* text-gray-300 */
+        }
+        /* Style for the loading indicator */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6; /* blue-500 */
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-4xl mx-auto bg-white shadow-2xl rounded-xl p-6 md:p-10">
+        <!-- Header -->
+        <h1 class="text-3xl font-bold text-gray-900 mb-2">Application Log Analyzer (Python Powered)</h1>
+        <p class="text-gray-500 mb-6">Upload a log file and filter lines using specific keywords. <span id="pyodide-status" class="font-medium text-amber-600">Loading Python Environment...</span></p>
+
+        <!-- Application State Storage -->
+        <script>
+            // Variable to hold the entire log file content once uploaded
+            let uploadedLogContent = null;
+            let pyodide = null;
+            let isPyodideReady = false;
+
+            /**
+             * Initialize Pyodide (Python interpreter in the browser).
+             */
+            async function loadPyodideAndDependencies() {
+                const statusElement = document.getElementById('pyodide-status');
+                statusElement.textContent = "Initializing Python interpreter...";
+                try {
+                    pyodide = await loadPyodide();
+                    isPyodideReady = true;
+                    statusElement.textContent = "Python Environment Ready (Pyodide)";
+                    statusElement.classList.remove('text-amber-600');
+                    statusElement.classList.add('text-green-600');
+                } catch (e) {
+                    statusElement.textContent = "ERROR: Failed to load Python environment.";
+                    statusElement.classList.remove('text-amber-600');
+                    statusElement.classList.add('text-red-600');
+                    console.error("Pyodide loading error:", e);
+                }
+            }
+            loadPyodideAndDependencies(); 
+        </script>
+
+        <!-- Input Section -->
+        <div class="space-y-6">
+            <!-- File Upload -->
+            <div class="border-b pb-4">
+                <label for="logFile" class="block text-sm font-medium text-gray-700 mb-2">1. Upload Log File (.log, .txt)</label>
+                <input 
+                    type="file" 
+                    id="logFile" 
+                    accept=".log,.txt,text/plain" 
+                    class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 p-2"
+                    onchange="handleFileSelect(event)"
+                >
+                <p id="file-status" class="mt-1 text-xs text-gray-600">No file uploaded.</p>
+            </div>
+
+            <!-- Keyword Input -->
+            <div class="border-b pb-4">
+                <label for="keywordInput" class="block text-sm font-medium text-gray-700 mb-2">2. Enter Keywords (Separate multiple keywords with commas)</label>
+                <input 
+                    type="text" 
+                    id="keywordInput" 
+                    placeholder="e.g., ERROR, timeout, connection failed, exception"
+                    class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500"
+                >
+                <p class="mt-1 text-xs text-gray-600">Keywords are case-sensitive (e.g., 'Error' is different from 'ERROR').</p>
+            </div>
+            
+            <!-- Search Button -->
+            <button 
+                onclick="runParser()" 
+                id="searchButton"
+                class="w-full flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out disabled:opacity-50"
+                disabled
+            >
+                <span id="button-text">3. Analyze Log File</span>
+                <div id="loading-spinner" class="spinner hidden ml-3"></div>
+            </button>
+        </div>
+
+        <!-- Results Section -->
+        <div class="mt-8">
+            <h2 class="text-xl font-semibold text-gray-900 mb-3">4. Analysis Results</h2>
+            <div id="results-output" class="p-4 rounded-lg border border-gray-700">
+                Awaiting file upload and keyword input...
+            </div>
+            <p id="match-count" class="mt-2 text-sm text-gray-600"></p>
+        </div>
+
+    </div>
+
+    <script>
+        
+        /**
+         * Cleans and sanitizes the input keywords for searching.
+         * @param {string} keywordString - Raw string input from the user (e.g., "ERROR, warn, fatal").
+         * @returns {string[]} An array of cleaned keywords.
+         */
+        function parseKeywords(keywordString) {
+            if (!keywordString) return [];
+            return keywordString.split(',')
+                .map(k => k.trim()) // Remove leading/trailing spaces
+                .filter(k => k.length > 0); // Remove empty strings
+        }
+
+        /**
+         * Reads the uploaded file content into the global variable.
+         * Enables the search button upon successful upload.
+         * @param {Event} event - The file change event.
+         */
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            const statusElement = document.getElementById('file-status');
+            const searchButton = document.getElementById('searchButton');
+
+            if (!file) {
+                statusElement.textContent = "No file selected.";
+                searchButton.disabled = true;
+                uploadedLogContent = null;
+                return;
+            }
+
+            // Simple validation
+            if (file.size > 50 * 1024 * 1024) { // Increased limit for Pyodide to 50MB
+                statusElement.textContent = `Error: File size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds the 50MB limit.`;
+                searchButton.disabled = true;
+                uploadedLogContent = null;
+                return;
+            }
+
+            statusElement.textContent = `Reading file: ${file.name}...`;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                uploadedLogContent = e.target.result;
+                statusElement.textContent = `File loaded: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB). Ready to analyze.`;
+                searchButton.disabled = false;
+            };
+
+            reader.onerror = function() {
+                statusElement.textContent = "Error reading file.";
+                uploadedLogContent = null;
+                searchButton.disabled = true;
+            };
+
+            // Read the file as plain text
+            reader.readAsText(file, "UTF-8");
+        }
+
+        /**
+         * Main function to execute the log parsing logic using Python (Pyodide).
+         */
+        async function runParser() {
+            const keywordInput = document.getElementById('keywordInput');
+            const resultsOutput = document.getElementById('results-output');
+            const matchCountElement = document.getElementById('match-count');
+            const searchButton = document.getElementById('searchButton');
+            const buttonText = document.getElementById('button-text');
+            const loadingSpinner = document.getElementById('loading-spinner');
+
+            if (!uploadedLogContent) {
+                resultsOutput.textContent = "Please upload a log file first.";
+                return;
+            }
+
+            const keywords = parseKeywords(keywordInput.value);
+
+            if (keywords.length === 0) {
+                resultsOutput.textContent = "Please enter one or more keywords.";
+                return;
+            }
+            
+            if (!isPyodideReady) {
+                resultsOutput.textContent = "Python environment is still loading. Please wait 10-20 seconds before running the analysis.";
+                return;
+            }
+
+            // UI Feedback: Disable button and show spinner
+            searchButton.disabled = true;
+            buttonText.textContent = "Analyzing with Python...";
+            loadingSpinner.classList.remove('hidden');
+            resultsOutput.textContent = "Executing Python script...";
+            matchCountElement.textContent = "";
+
+
+            // --- Python Parsing Script (Simplified and Human-Readable) ---
+            const pythonCode = `
+import json
+
+# --- INPUT VARIABLES FROM JAVASCRIPT ---
+# The full log file content as one big string.
+full_log_text = js_log_content
+# The list of search terms (e.g., ['ERROR', 'timeout']).
+search_terms = json.loads(js_keywords_json) 
+
+# Clean up keywords: strip whitespace from each term.
+cleaned_keywords = [term.strip() for term in search_terms]
+
+# Separate the single text block into a list of individual lines.
+all_log_lines = full_log_text.splitlines()
+
+# --- CORE LOGIC: SEARCH AND FILTER ---
+matching_lines = []
+total_lines_processed = len(all_log_lines)
+
+# Loop through every line in the log file.
+for line in all_log_lines:
+    # Check if any of the user's keywords are present in the current line.
+    is_a_match = False
+    for keyword in cleaned_keywords:
+        if keyword in line:
+            is_a_match = True
+            break # Found a match, stop checking other keywords for this line.
+            
+    if is_a_match:
+        # Add the line to our results, stripping any extra whitespace.
+        matching_lines.append(line.strip())
+
+# --- OUTPUT VARIABLES TO JAVASCRIPT ---
+# The count of matching lines.
+py_match_count = len(matching_lines)
+# The final result text, joined back into a single string with newlines.
+py_results_text = '\\n'.join(matching_lines)
+# The total number of lines checked.
+py_total_lines = total_lines_processed
+`;
+            
+            // --- Execution ---
+            try {
+                // 1. Expose JavaScript variables to the Python environment
+                pyodide.globals.set("js_log_content", uploadedLogContent);
+                // 2. Pass keywords array as a JSON string to ensure clean Python list conversion
+                pyodide.globals.set("js_keywords_json", JSON.stringify(keywords)); 
+
+                // 3. Execute the Python code asynchronously
+                await pyodide.runPythonAsync(pythonCode);
+
+                // 4. Retrieve results from the Python global scope
+                const matchCount = pyodide.globals.get('py_match_count');
+                const resultsText = pyodide.globals.get('py_results_text');
+                const totalLines = pyodide.globals.get('py_total_lines');
+                
+                // Display results (JavaScript side)
+                if (matchCount > 0) {
+                    resultsOutput.textContent = resultsText;
+                    matchCountElement.textContent = `Found ${matchCount} matching lines out of ${totalLines} total lines.`;
+                } else {
+                    resultsOutput.textContent = `No lines found matching any of the keywords: [${keywords.join(', ')}]`;
+                    matchCountElement.textContent = `Checked ${totalLines} total lines.`;
+                }
+
+            } catch (error) {
+                // Handle potential Pyodide or Python runtime errors
+                resultsOutput.textContent = `Python Analysis Error: ${error}`;
+                console.error("Python Parsing Error:", error);
+                matchCountElement.textContent = "Analysis failed.";
+            } finally {
+                // UI Feedback: Re-enable button and hide spinner
+                searchButton.disabled = false;
+                buttonText.textContent = "3. Analyze Log File";
+                loadingSpinner.classList.add('hidden');
+            }
+        }
+
+    </script>
+</body>
+</html>
